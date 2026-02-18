@@ -1,14 +1,14 @@
-"""Spatial Canvas — MVP.
+"""Spatial Canvas — Virtual Painter MVP.
 
-Blank canvas. Pinch = wake Claude.
-Claude's generated design is projected onto the whiteboard for annotation.
+Finger drawing on projected canvas with toolbar mode switching.
+Draw, erase, wake Claude, or clear — all via projected buttons + pinch gestures.
 
 Controls:
   q/ESC   — Quit
   c       — Start calibration
   r       — Reset calibration
   s       — Save snapshot
-  x       — Clear projected content
+  x       — Clear all strokes
   space   — Record calibration point (during calibration)
 """
 
@@ -35,9 +35,19 @@ from config import (
     COLOR_BORDER,
     CURSOR_RADIUS,
     CURSOR_PINCH_RADIUS,
+    PINCH_DEBOUNCE_FRAMES,
     DEBUG_WINDOW_NAME,
     DEBUG_SCALE,
     SNAPSHOT_PATH,
+    DRAW_COLOR,
+    DRAW_WIDTH,
+    ERASER_WIDTH,
+    ERASER_RADIUS,
+    TOOLBAR_Y,
+    TOOLBAR_BTN_W,
+    TOOLBAR_BTN_H,
+    TOOLBAR_BTN_GAP,
+    TOOLBAR_X_START,
 )
 from camera import Camera
 from hand_tracker import HandTracker
@@ -50,10 +60,22 @@ def log(tag, msg):
     print(f"[{ts}][{tag}] {msg}")
 
 
+# Toolbar button definitions
+TOOLBAR_BUTTONS = []
+_btn_x = TOOLBAR_X_START
+for label, mode in [("Draw", "draw"), ("Erase", "erase"), ("Claude", "claude"), ("Clear", "clear")]:
+    TOOLBAR_BUTTONS.append({
+        "label": label,
+        "mode": mode,
+        "rect": pygame.Rect(_btn_x, TOOLBAR_Y, TOOLBAR_BTN_W, TOOLBAR_BTN_H),
+    })
+    _btn_x += TOOLBAR_BTN_W + TOOLBAR_BTN_GAP
+
+
 class SpatialCanvasApp:
     def __init__(self):
         print("=" * 50)
-        print("  SPATIAL CANVAS v0.4 — MVP")
+        print("  SPATIAL CANVAS v0.5 — Virtual Painter")
         print("=" * 50)
 
         log("init", "Opening camera...")
@@ -72,8 +94,14 @@ class SpatialCanvasApp:
         # State
         self.running = True
         self.cursor_pos = None
-        self.is_pinching = False
+        self.is_pinching = False           # debounced pinch state
+        self._raw_pinching = False         # raw frame-by-frame pinch
         self._was_pinching = False
+        self._pinch_counter = 0            # frames of consistent raw pinch state
+        self.is_drawing_gesture = False    # debounced: index-only finger = draw
+        self._raw_drawing = False
+        self._was_drawing_gesture = False
+        self._draw_counter = 0             # debounce counter for draw gesture
         self.hands = []
         self.current_frame = None
         self.fps = 0
@@ -81,10 +109,17 @@ class SpatialCanvasApp:
         self.fps_timer = time.time()
         self.claude_busy = False
 
-        # Projected content
-        self.projected_lines = []        # Text response from Claude
-        self.preview_surface = None      # Rendered HTML as pygame surface
-        self.preview_rect = None         # Where to show it on projector
+        # Mode: "draw", "erase", "claude"
+        self.mode = "draw"
+
+        # Drawing state
+        self.strokes = []           # list of {"points": [(x,y),...], "color": (R,G,B), "width": int}
+        self.active_stroke = None   # current stroke being drawn (reference into self.strokes)
+
+        # Projected content (Claude)
+        self.projected_lines = []
+        self.preview_surface = None
+        self.preview_rect = None
 
         # Debug window
         cv2.namedWindow(DEBUG_WINDOW_NAME, cv2.WINDOW_NORMAL)
@@ -94,8 +129,8 @@ class SpatialCanvasApp:
             int(self.camera.height * DEBUG_SCALE),
         )
 
-        log("init", "Ready! Pinch to wake Claude.")
-        log("init", "x = clear projected content")
+        log("init", "Ready! Mode: Draw. Pinch to draw.")
+        log("init", "Toolbar: Draw | Erase | Claude | Clear")
         print("=" * 50)
 
     def _load_preview(self):
@@ -104,10 +139,9 @@ class SpatialCanvasApp:
             return
         try:
             img = pygame.image.load(PREVIEW_PATH)
-            # Scale to fit right portion of projector (with margin)
             margin = 40
             max_w = PROJECTOR_WIDTH // 2 - margin * 2
-            max_h = PROJECTOR_HEIGHT - margin * 2 - 60  # room for status text
+            max_h = PROJECTOR_HEIGHT - margin * 2 - 100  # room for toolbar + status
 
             img_w, img_h = img.get_size()
             scale = min(max_w / img_w, max_h / img_h, 1.0)
@@ -115,7 +149,6 @@ class SpatialCanvasApp:
             new_h = int(img_h * scale)
 
             self.preview_surface = pygame.transform.smoothscale(img, (new_w, new_h))
-            # Position on right half, vertically centered
             px = PROJECTOR_WIDTH // 2 + (PROJECTOR_WIDTH // 2 - new_w) // 2
             py = (PROJECTOR_HEIGHT - new_h) // 2
             self.preview_rect = (px, py, new_w, new_h)
@@ -123,8 +156,8 @@ class SpatialCanvasApp:
         except Exception as e:
             log("preview", f"Failed to load: {e}")
 
-    def _on_pinch(self):
-        """Pinch detected — wake Claude."""
+    def _on_pinch_claude(self):
+        """Pinch in Claude mode — wake Claude."""
         if self.claude_busy:
             log("pinch", "Claude is busy, ignoring")
             return
@@ -133,15 +166,12 @@ class SpatialCanvasApp:
         self.claude_busy = True
         self.projected_lines = ["$ waking claude..."]
 
-        # Save camera frame
         if self.current_frame is not None:
             cv2.imwrite(SNAPSHOT_PATH, self.current_frame)
             log("pinch", f"Frame saved to {SNAPSHOT_PATH}")
 
-        # Call Claude in background thread
         def on_response(response, has_preview):
             log("claude", f"Response ({len(response)} chars), preview={has_preview}")
-            # Split into lines for projection
             lines = []
             for line in response.split("\n"):
                 while len(line) > 60:
@@ -151,17 +181,26 @@ class SpatialCanvasApp:
             self.projected_lines = lines
             self.claude_busy = False
 
-            # Load rendered preview
             if has_preview:
                 self._load_preview()
 
         call_claude(SNAPSHOT_PATH, transcript=None, callback=on_response)
 
+    def _toolbar_hit_test(self, pos):
+        """Check if pos hits a toolbar button. Returns button dict or None."""
+        if pos is None:
+            return None
+        px, py = int(pos[0]), int(pos[1])
+        for btn in TOOLBAR_BUTTONS:
+            if btn["rect"].collidepoint(px, py):
+                return btn
+        return None
+
     def run(self):
         signal.signal(signal.SIGINT, lambda *_: setattr(self, 'running', False))
         signal.signal(signal.SIGTERM, lambda *_: setattr(self, 'running', False))
 
-        log("app", "Main loop... (q to quit, pinch to wake Claude)")
+        log("app", "Main loop... (q to quit)")
         try:
             while self.running:
                 self._handle_events()
@@ -197,10 +236,12 @@ class SpatialCanvasApp:
                 cv2.imwrite(path, self.current_frame)
                 log("capture", f"Saved to {path}")
         elif key == ord("x"):
+            self.strokes = []
+            self.active_stroke = None
             self.projected_lines = []
             self.preview_surface = None
             self.preview_rect = None
-            log("action", "Cleared projected content")
+            log("action", "Cleared all content")
         elif key == ord(" "):
             if self.calibration.calibrating and self.hands:
                 done = self.calibration.record_point(self.hands[0].index_tip)
@@ -222,16 +263,38 @@ class SpatialCanvasApp:
         self.hands = self.tracker.process(frame)
 
         self.cursor_pos = None
-        self.is_pinching = False
+        self._raw_pinching = False
+        self._raw_drawing = False
         camera_cursor = None
 
         if self.hands:
             primary = self.hands[0]
             camera_cursor = primary.index_tip
-            self.is_pinching = primary.is_pinching
+            self._raw_pinching = primary.is_pinching
+            self._raw_drawing = primary.index_only
+
+            # Debounce pinch: require N consecutive frames to change state
+            if self._raw_pinching != self.is_pinching:
+                self._pinch_counter += 1
+                if self._pinch_counter >= PINCH_DEBOUNCE_FRAMES:
+                    self.is_pinching = self._raw_pinching
+                    self._pinch_counter = 0
+            else:
+                self._pinch_counter = 0
+
+            # Debounce drawing gesture: same logic
+            if self._raw_drawing != self.is_drawing_gesture:
+                self._draw_counter += 1
+                if self._draw_counter >= PINCH_DEBOUNCE_FRAMES:
+                    self.is_drawing_gesture = self._raw_drawing
+                    self._draw_counter = 0
+            else:
+                self._draw_counter = 0
 
             if self.frame_count % 30 == 0:
-                log("hand", f"pos={camera_cursor} pinch={self.is_pinching}")
+                fingers = ''.join(['T' if f else '_' for f in primary.fingers_up])
+                gesture = "DRAW" if self.is_drawing_gesture else "MOVE" if primary.index_middle_up else "IDLE"
+                log("hand", f"cam={camera_cursor} gesture={gesture} fingers={fingers} pinch={self.is_pinching} dist={primary.pinch_dist:.3f} mode={self.mode}")
 
             if self.calibration.is_calibrated:
                 self.cursor_pos = self.calibration.transform_point(camera_cursor)
@@ -246,12 +309,68 @@ class SpatialCanvasApp:
             done = self.calibration.record_point(camera_cursor)
             if done:
                 log("calibration", "Complete!")
+            self._was_pinching = self.is_pinching
+            return
 
-        # Pinch = wake Claude
-        if self.is_pinching and not self._was_pinching and not self.calibration.calibrating:
-            self._on_pinch()
+        # --- PINCH: toolbar buttons + Claude ---
+        if self.is_pinching and not self._was_pinching and self.cursor_pos:
+            hit_btn = self._toolbar_hit_test(self.cursor_pos)
+            if hit_btn:
+                if hit_btn["mode"] == "clear":
+                    self.strokes = []
+                    self.active_stroke = None
+                    self.projected_lines = []
+                    self.preview_surface = None
+                    self.preview_rect = None
+                    log("toolbar", "Cleared all content")
+                else:
+                    self.mode = hit_btn["mode"]
+                    log("toolbar", f"Mode: {self.mode}")
+            elif self.mode == "claude":
+                self._on_pinch_claude()
+            else:
+                log("pinch", f"Pinch at {self._cursor_ints()} (mode={self.mode}, no action)")
+
+        # --- INDEX FINGER DRAW: start stroke ---
+        if self.is_drawing_gesture and not self._was_drawing_gesture and self.cursor_pos:
+            if self.mode == "draw":
+                pt = self._cursor_ints()
+                self.active_stroke = {
+                    "points": [pt],
+                    "color": DRAW_COLOR,
+                    "width": DRAW_WIDTH,
+                }
+                self.strokes.append(self.active_stroke)
+                log("draw", f"New stroke #{len(self.strokes)} at {pt}")
+            elif self.mode == "erase":
+                pt = self._cursor_ints()
+                self.active_stroke = {
+                    "points": [pt],
+                    "color": COLOR_BG,
+                    "width": ERASER_WIDTH,
+                }
+                self.strokes.append(self.active_stroke)
+                log("erase", f"Erasing at {pt}")
+
+        # --- INDEX FINGER DRAW: continue stroke ---
+        elif self.is_drawing_gesture and self._was_drawing_gesture and self.cursor_pos and self.active_stroke:
+            pt = self._cursor_ints()
+            self.active_stroke["points"].append(pt)
+            if len(self.active_stroke["points"]) % 10 == 0:
+                log("draw", f"  stroke #{len(self.strokes)} has {len(self.active_stroke['points'])} pts, latest={pt}")
+
+        # --- INDEX FINGER DRAW: end stroke ---
+        elif not self.is_drawing_gesture and self._was_drawing_gesture:
+            if self.active_stroke:
+                log("draw", f"<<< Stroke ended, {len(self.active_stroke['points'])} pts")
+            self.active_stroke = None
 
         self._was_pinching = self.is_pinching
+        self._was_drawing_gesture = self.is_drawing_gesture
+
+    def _cursor_ints(self):
+        """Return cursor_pos as integer tuple."""
+        return (int(self.cursor_pos[0]), int(self.cursor_pos[1]))
 
     # --- Projector rendering ---
 
@@ -263,16 +382,33 @@ class SpatialCanvasApp:
             self.projector.flip()
             return
 
+        # --- Strokes ---
+        for stroke in self.strokes:
+            pts = stroke["points"]
+            if len(pts) >= 2:
+                pygame.draw.lines(
+                    self.projector.screen,
+                    stroke["color"],
+                    False,  # not closed
+                    pts,
+                    stroke["width"],
+                )
+            elif len(pts) == 1:
+                # Single point — draw a dot
+                pygame.draw.circle(
+                    self.projector.screen,
+                    stroke["color"],
+                    pts[0],
+                    stroke["width"] // 2,
+                )
+
         # --- Preview image (right half) ---
         if self.preview_surface and self.preview_rect:
             px, py, pw, ph = self.preview_rect
-            # Subtle glow behind preview
             shadow_rect = pygame.Rect(px + 4, py + 4, pw, ph)
             pygame.draw.rect(self.projector.screen, (40, 40, 40), shadow_rect, border_radius=8)
-            # Border
             border_rect = pygame.Rect(px - 2, py - 2, pw + 4, ph + 4)
             pygame.draw.rect(self.projector.screen, COLOR_BORDER, border_rect, width=2, border_radius=8)
-            # Image
             self.projector.screen.blit(self.preview_surface, (px, py))
 
         # --- Claude thinking ---
@@ -283,9 +419,9 @@ class SpatialCanvasApp:
                 (60, PROJECTOR_HEIGHT // 2 - 20), COLOR_ACCENT, font_size="large",
             )
 
-        # --- Text response (left half, above or below drawing area) ---
+        # --- Text response ---
         if self.projected_lines and not self.claude_busy:
-            y = 40
+            y = TOOLBAR_Y + TOOLBAR_BTN_H + 30
             for line in self.projected_lines:
                 if y > PROJECTOR_HEIGHT - 80:
                     break
@@ -293,10 +429,23 @@ class SpatialCanvasApp:
                 self.projector.draw_text(line, (40, y), color, font_size="small")
                 y += 32
 
+        # --- Toolbar ---
+        self._render_toolbar()
+
+        # --- Eraser preview ---
+        if self.mode == "erase" and self.cursor_pos and self.is_pinching:
+            cx, cy = int(self.cursor_pos[0]), int(self.cursor_pos[1])
+            pygame.draw.circle(self.projector.screen, COLOR_CURSOR_PINCH, (cx, cy), ERASER_RADIUS, 2)
+
         # --- Cursor ---
         if self.cursor_pos:
             cx, cy = int(self.cursor_pos[0]), int(self.cursor_pos[1])
-            color = COLOR_CURSOR_PINCH if self.is_pinching else COLOR_CURSOR
+            if self.is_drawing_gesture and self.mode in ("draw", "erase"):
+                color = (255, 140, 0)  # orange when drawing
+            elif self.is_pinching:
+                color = COLOR_CURSOR_PINCH
+            else:
+                color = COLOR_CURSOR
             radius = CURSOR_PINCH_RADIUS if self.is_pinching else CURSOR_RADIUS
             gap, thickness = 8, 4
             pygame.draw.line(self.projector.screen, color, (cx - radius - 10, cy), (cx - gap, cy), thickness)
@@ -307,12 +456,43 @@ class SpatialCanvasApp:
 
         # --- Status ---
         cal = "calibrated" if self.calibration.is_calibrated else "uncalibrated (c)"
+        strokes_count = len(self.strokes)
         self.projector.draw_text(
-            f"{self.fps:.0f}fps | {cal} | pinch=claude  x=clear",
+            f"{self.fps:.0f}fps | {cal} | {strokes_count} strokes | x=clear",
             (12, PROJECTOR_HEIGHT - 34), COLOR_TEXT_DIM, font_size="small",
         )
 
         self.projector.flip()
+
+    def _render_toolbar(self):
+        """Render the mode toolbar at the top of the projector."""
+        for btn in TOOLBAR_BUTTONS:
+            rect = btn["rect"]
+            is_active = (btn["mode"] == self.mode)
+            is_clear = (btn["mode"] == "clear")
+
+            if is_active and not is_clear:
+                # Active mode: filled bright
+                pygame.draw.rect(self.projector.screen, COLOR_ACCENT, rect, border_radius=8)
+                text_color = (0, 0, 0)
+            else:
+                # Inactive: outline only
+                pygame.draw.rect(self.projector.screen, COLOR_BORDER, rect, width=2, border_radius=8)
+                text_color = COLOR_TEXT if not is_clear else COLOR_CURSOR_PINCH
+
+            # Check hover
+            if self.cursor_pos:
+                if rect.collidepoint(int(self.cursor_pos[0]), int(self.cursor_pos[1])):
+                    if not is_active:
+                        pygame.draw.rect(self.projector.screen, COLOR_TEXT_DIM, rect, width=2, border_radius=8)
+
+            # Label
+            self.projector.draw_text_centered(
+                btn["label"],
+                (rect.x, rect.y, rect.width, rect.height),
+                text_color,
+                font_size="mono",
+            )
 
     def _render_calibration(self):
         self.projector.draw_text("$ calibrate --points 4", (30, 30), COLOR_TEXT, font_size="large")
@@ -356,13 +536,20 @@ class SpatialCanvasApp:
         else:
             cv2.putText(debug, "UNCALIBRATED (c)", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
-        if self.claude_busy:
-            cv2.putText(debug, "CLAUDE THINKING...", (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+        # Show current mode + gesture
+        mode_text = f"MODE: {self.mode.upper()}"
+        mode_color = (0, 200, 100) if self.mode == "draw" else (0, 100, 255) if self.mode == "claude" else (0, 0, 255)
+        cv2.putText(debug, mode_text, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.7, mode_color, 2)
+
+        if self.is_drawing_gesture:
+            cv2.putText(debug, "DRAWING", (10, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 140, 255), 2)
+        elif self.claude_busy:
+            cv2.putText(debug, "CLAUDE THINKING...", (10, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
 
         if self.is_pinching:
             cv2.putText(debug, "PINCH!", (debug.shape[1] - 150, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
-        info = f"FPS: {self.fps:.0f} | Hands: {len(self.hands)}"
+        info = f"FPS: {self.fps:.0f} | Hands: {len(self.hands)} | Strokes: {len(self.strokes)}"
         cv2.putText(debug, info, (10, debug.shape[0] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
 
         cv2.imshow(DEBUG_WINDOW_NAME, debug)

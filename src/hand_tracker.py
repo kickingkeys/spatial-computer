@@ -18,13 +18,28 @@ MODEL_PATH = os.path.join(
 
 class HandData:
     """Data for a single detected hand."""
-    __slots__ = ("index_tip", "thumb_tip", "is_pinching", "landmarks")
+    __slots__ = ("index_tip", "thumb_tip", "is_pinching", "pinch_dist",
+                 "fingers_up", "landmarks")
 
-    def __init__(self, index_tip, thumb_tip, is_pinching, landmarks):
+    def __init__(self, index_tip, thumb_tip, is_pinching, pinch_dist,
+                 fingers_up, landmarks):
         self.index_tip = index_tip        # (x, y) in pixel coords
         self.thumb_tip = thumb_tip        # (x, y) in pixel coords
         self.is_pinching = is_pinching    # bool
+        self.pinch_dist = pinch_dist      # normalized thumb-index distance
+        self.fingers_up = fingers_up      # [thumb, index, middle, ring, pinky] bools
         self.landmarks = landmarks        # all 21 landmarks as [(x,y), ...]
+
+    @property
+    def index_only(self):
+        """True when index is up and middle is down (draw gesture).
+        Ignores ring/pinky — they flicker too much at distance."""
+        return self.fingers_up[1] and not self.fingers_up[2]
+
+    @property
+    def index_middle_up(self):
+        """True when index + middle are both extended (move/select gesture)."""
+        return self.fingers_up[1] and self.fingers_up[2]
 
 
 class HandTracker:
@@ -90,7 +105,26 @@ class HandTracker:
                 dist = math.sqrt(dx * dx + dy * dy)
                 is_pinching = dist < PINCH_THRESHOLD
 
-                hands.append(HandData(index_tip, thumb_tip, is_pinching, landmarks))
+                # Detect which fingers are extended (orientation-independent).
+                # A finger is "up" if its tip is farther from its MCP base than its PIP joint is.
+                # This works regardless of hand angle/rotation.
+                #   Index:  tip=8,  PIP=6,  MCP=5
+                #   Middle: tip=12, PIP=10, MCP=9
+                #   Ring:   tip=16, PIP=14, MCP=13
+                #   Pinky:  tip=20, PIP=18, MCP=17
+                #   Thumb:  tip=4,  IP=3,   MCP=2
+                def _dist(a, b):
+                    return math.sqrt((a.x - b.x)**2 + (a.y - b.y)**2)
+
+                fingers_up = [False] * 5
+                wrist = hand_landmarks[0]
+                fingers_up[0] = _dist(hand_landmarks[4], wrist) > _dist(hand_landmarks[3], wrist)  # thumb
+                fingers_up[1] = _dist(hand_landmarks[8], hand_landmarks[5]) > _dist(hand_landmarks[6], hand_landmarks[5])   # index
+                fingers_up[2] = _dist(hand_landmarks[12], hand_landmarks[9]) > _dist(hand_landmarks[10], hand_landmarks[9])  # middle
+                fingers_up[3] = _dist(hand_landmarks[16], hand_landmarks[13]) > _dist(hand_landmarks[14], hand_landmarks[13]) # ring
+                fingers_up[4] = _dist(hand_landmarks[20], hand_landmarks[17]) > _dist(hand_landmarks[18], hand_landmarks[17]) # pinky
+
+                hands.append(HandData(index_tip, thumb_tip, is_pinching, dist, fingers_up, landmarks))
 
         return hands
 

@@ -19,6 +19,7 @@ MAX_HANDS = 2
 HAND_DETECTION_CONFIDENCE = 0.7
 HAND_TRACKING_CONFIDENCE = 0.6
 PINCH_THRESHOLD = 0.05
+PINCH_DEBOUNCE_FRAMES = 3              # consecutive frames to confirm pinch on/off
 
 # --- Calibration ---
 CALIBRATION_FILE = os.path.join(
@@ -37,6 +38,19 @@ COLOR_CURSOR = (0, 220, 100)            # green cursor
 COLOR_CURSOR_PINCH = (255, 60, 60)      # red on pinch
 COLOR_BORDER = (100, 100, 100)          # dim border
 COLOR_CALIBRATION_DOT = (255, 60, 60)   # red calibration dots
+
+# --- Drawing ---
+DRAW_COLOR = (255, 255, 255)            # white strokes
+DRAW_WIDTH = 5                          # stroke thickness in pixels
+ERASER_WIDTH = 30                       # eraser thickness
+ERASER_RADIUS = 20                      # eraser preview circle radius
+
+# --- Toolbar ---
+TOOLBAR_Y = 20                          # top margin
+TOOLBAR_BTN_W = 160                     # button width
+TOOLBAR_BTN_H = 60                      # button height
+TOOLBAR_BTN_GAP = 30                    # gap between buttons
+TOOLBAR_X_START = 100                   # first button x position
 
 # --- Cursor ---
 CURSOR_RADIUS = 24

@@ -1,35 +1,48 @@
 # Spatial Canvas — TODO
 
-## Up Next
+## Current Direction: Overhead Camera + Screen Output
 
-### Virtual Painter (Finger Drawing)
-Replace physical whiteboard markers with projected digital ink. Track fingertip via MediaPipe, render strokes through the projector onto any surface (desk, wall, paper).
+Physical workspace as input, screen as output. Camera watches your desk — reads sketches, post-its, objects. Claude processes what it sees and acts on a screen in front of you.
 
-**What to build:**
-- Drawing state machine: pinch = draw, release = lift pen (or index-only = draw, two fingers = move)
-- Stroke buffer: list of polylines stored as coordinate lists
-- Render strokes in bright colors (green, cyan, orange) on the black pygame canvas
-- Use existing calibration homography so projected lines align with finger position
-- Feed stroke canvas to Claude alongside camera frame for context
+### MVP — Desk Watcher
 
-**Why it matters:**
-- Works on any surface — no whiteboard marker needed
-- Enables spatial use on desks, tables, notebooks, bare walls
-- ~50-80 lines added to app.py
+- [ ] Overhead camera setup (C922 mounted looking down at desk)
+- [ ] Trigger mechanism (voice command? keyboard shortcut? periodic auto-scan?)
+- [ ] Camera snapshot → Claude vision → action on screen
+- [ ] Post-it note reading (high contrast, structured input)
+- [ ] Paper sketch/wireframe recognition
+- [ ] Screen output: live browser showing Claude's generated HTML
+- [ ] Always-on audio transcription (voice context for Claude)
 
-### Always-On Audio Transcription
-Add speech-to-text so Claude gets voice context alongside the camera frame when woken up.
+### Open Design Questions
 
-### End-to-End Design Test
-Sketch a real wireframe (drawn or finger-painted), pinch to wake Claude, get working HTML projected back. Full loop.
+- Camera placement: overhead vs angled?
+- Trigger: "hey Claude, look" vs hotkey vs always-on?
+- Output: full browser window? split-screen with camera feed?
+- Projector role: desk overlay for highlighting? drop entirely for MVP?
+- Post-it conventions: color-coded? labeled? free-form?
 
-### Redo Calibration
-Current calibration has points 1 & 2 nearly identical. Redo with better 4-point spread.
+---
 
-## Future Ideas
+## Archived: Projector-Based Approaches
 
-- Live browser preview instead of static PNG screenshot
-- Color/brush selection via hand gestures
-- Undo gesture (e.g. open palm swipe)
-- Multi-layer canvas (strokes + Claude preview + annotations)
-- Folk Computer integration
+*Explored in sessions 01-03. Working but pivoted away from.*
+
+### ~~Virtual Painter (Finger Drawing on Projector)~~ — PAUSED
+Explored in session 03. Gesture detection too noisy at distance, air-drawing lacks tactile feedback, projector adds complexity without proportional benefit. See session-03 log for full analysis.
+
+### ~~Projector Canvas + Claude~~ — WORKING, DEPRIORITIZED
+Pinch-to-wake Claude, HTML preview projected on whiteboard. Dark mode enforced. Works but projector-as-primary-output has visibility limitations. Code still in repo (app.py v0.5).
+
+---
+
+## Decision Log
+
+| Date | Decision | Why |
+|------|----------|-----|
+| 2026-02-14 | Use pinch gesture over dwell for clicking | More intentional, less accidental activation |
+| 2026-02-14 | Claude CLI (`claude -p`) over Anthropic SDK | No API key needed, leverages existing auth |
+| 2026-02-14 | Chrome headless for HTML→PNG rendering | Zero-install, Chrome already present |
+| 2026-02-14 | Dark projector theme (black bg, bright text) | Physics: projectors add light, can't show dark on white wall |
+| 2026-02-18 | Pivot from projector drawing to overhead camera + screen | Gesture detection too noisy, air-drawing unnatural, physical input is better |
+| 2026-02-18 | Post-it notes as structured input | High contrast, easy to read, natural for architects |
