@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>ml5 handPose test</title>
+  <script src="https://unpkg.com/ml5@1/dist/ml5.min.js"></script>
+</head>
+<body style="background:#000;color:#fff;font-family:monospace">
+  <h3>ml5 handPose debug test</h3>
+  <video id="video" width="640" height="480" autoplay playsinline muted style="display:block"></video>
+  <pre id="log"></pre>
+  <script>
+    const log = document.getElementById('log');
+    const video = document.getElementById('video');
+
+    function addLog(msg) {
+      log.textContent += msg + '\n';
+      console.log(msg);
+    }
+
+    async function main() {
+      addLog('1. Getting camera...');
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+      video.srcObject = stream;
+      await new Promise(r => video.onloadeddata = r);
+      addLog('2. Camera ready, video playing: ' + !video.paused);
+
+      addLog('3. ml5 version: ' + (ml5.version || 'unknown'));
+      addLog('4. typeof ml5.handPose: ' + typeof ml5.handPose);
+
+      addLog('5. Calling ml5.handPose()...');
+      const result = ml5.handPose();
+      addLog('6. Return type: ' + typeof result);
+      addLog('7. Is promise: ' + (result instanceof Promise));
+      addLog('8. Constructor name: ' + (result?.constructor?.name || 'N/A'));
+
+      // Check if it has detectStart
+      addLog('9. Has detectStart: ' + (typeof result.detectStart));
+      addLog('10. Has detect: ' + (typeof result.detect));
+
+      // If it's a promise, await it
+      if (result instanceof Promise) {
+        addLog('11. Awaiting promise...');
+        const hp = await result;
+        addLog('12. Resolved type: ' + typeof hp);
+        addLog('13. Resolved constructor: ' + (hp?.constructor?.name || 'N/A'));
+        addLog('14. Has detectStart: ' + (typeof hp.detectStart));
+        addLog('15. Methods: ' + Object.getOwnPropertyNames(Object.getPrototypeOf(hp)).join(', '));
+
+        addLog('16. Starting detectStart...');
+        hp.detectStart(video, (results) => {
+          if (results.length > 0) {
+            const h = results[0];
+            addLog('HAND: keys=' + Object.keys(h).join(','));
+            addLog('  thumb_tip: ' + JSON.stringify(h.thumb_tip));
+            addLog('  index_finger_tip: ' + JSON.stringify(h.index_finger_tip));
+            addLog('  keypoints count: ' + (h.keypoints?.length || 0));
+            if (h.keypoints?.[0]) addLog('  kp[0] keys: ' + Object.keys(h.keypoints[0]).join(','));
+            hp.detectStop(); // stop after first detection
+            addLog('DONE - detection works!');
+          }
+        });
+      } else {
+        // Maybe it has a callback pattern
+        addLog('11b. Not a promise. Checking .ready...');
+        addLog('12b. Has ready: ' + (typeof result.ready));
+        if (result.ready && typeof result.ready.then === 'function') {
+          const hp = await result.ready;
+          addLog('13b. Ready resolved. detectStart: ' + typeof hp?.detectStart);
+        }
+      }
+    }
+
+    main().catch(e => addLog('ERROR: ' + e.message));
+  </script>
+</body>
+</html>

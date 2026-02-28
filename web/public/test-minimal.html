@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Minimal handPose test</title>
+  <script src="https://unpkg.com/ml5@1/dist/ml5.min.js"></script>
+</head>
+<body style="background:#000;color:#0f0;font-family:monospace;padding:20px">
+  <h2>Minimal ml5 handPose Test</h2>
+  <p>Open browser console for details</p>
+  <video id="video" width="640" height="480" autoplay playsinline muted style="display:block;margin:10px 0"></video>
+  <pre id="log" style="font-size:14px;line-height:1.6"></pre>
+
+  <script>
+    const video = document.getElementById('video');
+    const log = document.getElementById('log');
+    let lineNum = 0;
+
+    function L(msg) {
+      lineNum++;
+      const line = `${lineNum}. ${msg}`;
+      log.textContent += line + '\n';
+      console.log(line);
+    }
+
+    async function run() {
+      // Step 1: Camera (default, no deviceId)
+      L('Getting default camera...');
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      video.srcObject = stream;
+      await new Promise(r => { video.onloadeddata = r; });
+      L(`Camera ready: ${video.videoWidth}x${video.videoHeight}, paused=${video.paused}`);
+
+      // Step 2: Load model
+      L('Loading ml5.handPose (this takes ~5-10s)...');
+      const hp = await ml5.handPose();
+      L('Model loaded!');
+
+      // Step 3: Detect
+      L('Starting detectStart...');
+      let detections = 0;
+      hp.detectStart(video, (results) => {
+        detections++;
+        if (results.length > 0) {
+          const h = results[0];
+          const thumb = h.thumb_tip;
+          const index = h.index_finger_tip;
+          if (thumb && index) {
+            const dist = Math.sqrt((thumb.x-index.x)**2 + (thumb.y-index.y)**2);
+            L(`HAND #${detections}: thumb=(${Math.round(thumb.x)},${Math.round(thumb.y)}) index=(${Math.round(index.x)},${Math.round(index.y)}) dist=${Math.round(dist)} ${dist<40?'PINCH!':''}`);
+          } else {
+            L(`HAND #${detections}: keys=${Object.keys(h).join(',')}`);
+          }
+          if (detections >= 5) {
+            hp.detectStop();
+            L('SUCCESS — stopped after 5 detections');
+          }
+        } else {
+          if (detections <= 3 || detections % 50 === 0) {
+            L(`Callback #${detections}: no hands (this is normal, keep your hand visible)`);
+          }
+        }
+      });
+    }
+
+    run().catch(e => L('ERROR: ' + e.message));
+  </script>
+</body>
+</html>

@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <script src="https://unpkg.com/ml5@1/dist/ml5.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; }
+    body { background: #000; overflow: hidden; }
+    video, canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+    .status { position: absolute; bottom: 4px; left: 8px; font: 9px/1 monospace; color: rgba(255,255,255,0.5); z-index: 10; }
+    .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+  </style>
+</head>
+<body>
+  <!-- Explicit width/height attributes like the working test -->
+  <video id="video" width="640" height="480" autoplay playsinline muted></video>
+  <canvas id="overlay"></canvas>
+  <div class="status"><span class="dot" id="dot" style="background:#ffcc00"></span><span id="statusText">loading...</span></div>
+
+  <script>
+    const video = document.getElementById('video');
+    const overlay = document.getElementById('overlay');
+    const ctx = overlay.getContext('2d');
+    const dot = document.getElementById('dot');
+    const statusText = document.getElementById('statusText');
+
+    const params = new URLSearchParams(window.location.search);
+    const cameraId = params.get('camera');
+
+    const connections = [
+      [0,1],[1,2],[2,3],[3,4],
+      [0,5],[5,6],[6,7],[7,8],
+      [0,9],[9,10],[10,11],[11,12],
+      [0,13],[13,14],[14,15],[15,16],
+      [0,17],[17,18],[18,19],[19,20],
+      [5,9],[9,13],[13,17]
+    ];
+
+    let latestHand = null; // latest processed hand result
+
+    async function run() {
+      // 1. Camera — match working test: use { video: true } then constrain if needed
+      statusText.textContent = 'getting camera...';
+      const constraints = cameraId
+        ? { video: { deviceId: { ideal: cameraId } } }
+        : { video: true };
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      video.srcObject = stream;
+      await new Promise(r => { video.onloadeddata = r; });
+
+      overlay.width = video.videoWidth || 640;
+      overlay.height = video.videoHeight || 480;
+
+      // 2. Load model
+      statusText.textContent = 'loading model...';
+      const hp = await ml5.handPose();
+      dot.style.background = '#00c864';
+      statusText.textContent = 'no hand';
+      window.parent.postMessage({ type: 'handpose', status: 'ready' }, '*');
+
+      // 3. Detect — callback just stores results, draw loop does rendering + messaging
+      hp.detectStart(video, (results) => {
+        if (results && results.length > 0) {
+          const h = results[0];
+          const thumb = h.thumb_tip;
+          const idx = h.index_finger_tip;
+          if (thumb && idx) {
+            const pinchDist = Math.sqrt((thumb.x - idx.x) ** 2 + (thumb.y - idx.y) ** 2);
+            latestHand = {
+              thumbTip: { x: thumb.x, y: thumb.y },
+              indexTip: { x: idx.x, y: idx.y },
+              isPinching: pinchDist < 40,
+              pinchDist,
+              landmarks: h.keypoints.map(p => ({ x: p.x, y: p.y })),
+            };
+          }
+        } else {
+          latestHand = null;
+        }
+      });
+
+      // 4. Draw loop
+      function draw() {
+        ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+        if (latestHand) {
+          const lm = latestHand.landmarks;
+          const color = latestHand.isPinching ? '#ff3c3c' : '#00c864';
+
+          // Skeleton
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 2;
+          for (const [a, b] of connections) {
+            if (!lm[a] || !lm[b]) continue;
+            ctx.beginPath();
+            ctx.moveTo(lm[a].x, lm[a].y);
+            ctx.lineTo(lm[b].x, lm[b].y);
+            ctx.stroke();
+          }
+
+          // Keypoints
+          ctx.fillStyle = color;
+          for (const p of lm) {
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+            ctx.fill();
+          }
+
+          // Pinch circle
+          if (latestHand.isPinching) {
+            const cx = (latestHand.thumbTip.x + latestHand.indexTip.x) / 2;
+            const cy = (latestHand.thumbTip.y + latestHand.indexTip.y) / 2;
+            ctx.beginPath();
+            ctx.arc(cx, cy, 20, 0, Math.PI * 2);
+            ctx.strokeStyle = '#00c864';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+          }
+
+          statusText.textContent = latestHand.isPinching ? 'PINCH' : 'tracking';
+          window.parent.postMessage({ type: 'handpose', hand: latestHand }, '*');
+        } else {
+          statusText.textContent = 'no hand';
+          window.parent.postMessage({ type: 'handpose', hand: null }, '*');
+        }
+
+        requestAnimationFrame(draw);
+      }
+      draw();
+    }
+
+    run().catch(e => {
+      statusText.textContent = 'error: ' + e.message;
+      console.error('handpose-worker error:', e);
+      window.parent.postMessage({ type: 'handpose', error: e.message }, '*');
+    });
+  </script>
+</body>
+</html>
